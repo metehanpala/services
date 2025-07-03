@@ -1,0 +1,372 @@
+import { TestBed, waitForAsync } from '@angular/core/testing';
+import { HttpClientTestingModule } from '@angular/common/http/testing';
+import { AppSettingsService, MockTraceService, TraceService } from '@gms-flex/services-common';
+import { Type } from '@angular/core';
+import { asapScheduler } from 'rxjs';
+import { GmsSubscriptionFsm } from '../shared/subscription/gms-subscription-fsm';
+import { GmsSubscription, SubscriptionState } from '../shared/subscription/gms-subscription';
+
+import { CommandSubscriptionProxyServiceBase } from '../wsi-proxy-api/command/command-subscription-proxy.service.base';
+import { PropertyCommand, SubscriptionGmsCmd, SubscriptionWsiCmd } from '../wsi-proxy-api/command/data.model';
+import { CommandSubscriptionService } from './command-subscription.service';
+import { CommandSubscriptionServiceBase } from './command-subscription.service.base';
+import { CommandSubscriptionProxyMockService } from './command-subscription-proxy.mock.service';
+
+// Tests  /////////////
+describe('CommandSubscriptionService, Simple Tests:', () => {
+
+  let trace: TraceService;
+  let commandSubscriptionService: CommandSubscriptionServiceBase;
+  let mockSubscriptionProxy: CommandSubscriptionProxyMockService;
+  const objectId1 = 'objectId1';
+  const objectId2 = 'objectId2';
+  const objectId3 = 'objectId3';
+  const objectId4 = 'objectId4';
+  const objectId5 = 'objectId5';
+  const clientId1 = 'clientId1';
+  const clientId2 = 'clientId2';
+  let keyCounter = 0;
+  let cmdSubsClient1: GmsSubscription<PropertyCommand>[] = [];
+  const stateNotifiesPerCmdSubscription: Map<number, SubscriptionState[]> = new Map<number, SubscriptionState[]>();
+  const stateNotifiesPerCmdSubscriptionExpected: Map<number, SubscriptionState[]> = new Map<number, SubscriptionState[]>();
+  let clientId1Key: string;
+
+  beforeEach(waitForAsync(() => {
+    TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
+      providers: [
+        { provide: 'appSettingFilePath', useValue: 'noMatter' },
+        AppSettingsService,
+        { provide: TraceService, useClass: MockTraceService },
+        { provide: CommandSubscriptionServiceBase, useClass: CommandSubscriptionService },
+        { provide: CommandSubscriptionProxyServiceBase, useClass: CommandSubscriptionProxyMockService }
+      ]
+    })
+      .compileComponents();
+
+    trace = TestBed.inject(TraceService as Type<TraceService>);
+    trace.traceSettings.allModulesEnabled = false;
+    commandSubscriptionService = TestBed.inject(CommandSubscriptionServiceBase as Type<CommandSubscriptionServiceBase>);
+
+    mockSubscriptionProxy = TestBed.inject(CommandSubscriptionProxyServiceBase as Type<CommandSubscriptionProxyMockService>);
+    keyCounter = 0;
+  }));
+
+  const onStateChangedClient1 = (state: SubscriptionState, objectOrPropertyId: string, vsId: number, done: DoneFn): void => {
+    stateNotifiesPerCmdSubscription.get(vsId)?.push(state);
+    checkAllUnsubscribedDone(done);
+  };
+
+  const checkAllUnsubscribedDone = (done: DoneFn): void => {
+    let allDone = true;
+    cmdSubsClient1.forEach(cs => {
+      if (cs.state !== SubscriptionState.Unsubscribed) {
+        allDone = false;
+      }
+    });
+    if (allDone) {
+      doChecks();
+      done();
+    }
+  };
+
+  const doChecks = (): void => {
+    cmdSubsClient1.forEach(cs => {
+      expect(stateNotifiesPerCmdSubscription.get(cs.id)?.length).toBe(
+        stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.length, 'Number of state notifications expected');
+      stateNotifiesPerCmdSubscription.get(cs.id)?.forEach((val, index) => {
+        expect(val).toBe(stateNotifiesPerCmdSubscriptionExpected.get(cs.id)![index], 'Check expected state');
+      });
+    });
+  };
+
+  const subscribeForClient1 = (objIdsClientId1: string[], done: DoneFn): void => {
+    const valSubs: GmsSubscription<PropertyCommand>[] = commandSubscriptionService.subscribeCommands(objIdsClientId1, clientId1Key);
+    cmdSubsClient1.push(...valSubs);
+    valSubs.forEach((sub, index) => {
+      stateNotifiesPerCmdSubscription.set(sub.id, []);
+      sub.stateChanged.subscribe(state => onStateChangedClient1(state, sub.gmsId, sub.id, done));
+    });
+  };
+
+  const init = (): void => {
+    stateNotifiesPerCmdSubscription.clear();
+    stateNotifiesPerCmdSubscriptionExpected.clear();
+    cmdSubsClient1 = [];
+    clientId1Key = commandSubscriptionService.registerClient(clientId1);
+  };
+
+  const getSubscribeReply = (objectOrPropertyIds: string[], errorCode: number): SubscriptionGmsCmd[] => {
+    const subsWsi: SubscriptionGmsCmd[] = [];
+    objectOrPropertyIds.forEach(id => {
+      const subWsiCmd: SubscriptionWsiCmd = {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        Key: keyCounter, SubscriptionId: id, PropertyId: 'Present_Value', ErrorCode: errorCode, RequestId: '', RequestFor: '' };
+      const subGms: SubscriptionGmsCmd = new SubscriptionGmsCmd(subWsiCmd);
+      keyCounter = keyCounter + 1;
+      subsWsi.push(subGms);
+    });
+    return subsWsi;
+  };
+
+  it('CommandSubscriptionService: 1. Create single subscription -> 2. Call Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1(objIds, done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const task: () => void = () => {
+        commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+        done();
+      };
+      asapScheduler.schedule(task);
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription with reply error code 1',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 1));
+      subscribeForClient1(objIds, done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription with failed response',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(undefined!);
+      subscribeForClient1(objIds, done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+      done();
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription -> 2. Call Unsubscribe -> 3. Late arrival of subscribe reply',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0), 200);
+      subscribeForClient1(objIds, done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const task: () => void = () => {
+        commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+        done();
+      };
+      asapScheduler.schedule(task);
+    }
+  );
+
+  it('CommandSubscriptionService: Create two subscriptions -> 2. Create second subscription of existing object -> 3. Call Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1, objectId2];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1([objIds[0]], done);
+      const vs1: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(vs1.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs1.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs1.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs1.id)?.push(SubscriptionState.Unsubscribed);
+      subscribeForClient1([objIds[1]], done);
+      const vs2: GmsSubscription<PropertyCommand> = cmdSubsClient1[1];
+      stateNotifiesPerCmdSubscriptionExpected.set(vs2.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Unsubscribed);
+
+      const taskSub: () => void = () => {
+        subscribeForClient1([objIds[0]], done);
+        const vs3: GmsSubscription<PropertyCommand> = cmdSubsClient1[2];
+        stateNotifiesPerCmdSubscriptionExpected.set(vs3.id, []);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs3.id)?.push(SubscriptionState.Subscribed);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs3.id)?.push(SubscriptionState.Unsubscribed);
+        done();
+      };
+      asapScheduler.schedule(taskSub);
+
+      const task: () => void = () => {
+        commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+        done();
+      };
+      asapScheduler.schedule(task);
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription -> 2. Disconnect -> 3. Reconnect -> 4. Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1(objIds, done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.ResubscribePending);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const taskDisc: () => void = () => {
+        mockSubscriptionProxy.notifyDisconnect();
+        done();
+      };
+      asapScheduler.schedule(taskDisc);
+
+      const taskRec: () => void = () => {
+        mockSubscriptionProxy.notifyReconnect();
+        // called in here in order tthat the subscribe reply of the reconnect runs first.
+        const task: () => void = () => {
+          commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+          done();
+        };
+        asapScheduler.schedule(task);
+        done();
+      };
+      asapScheduler.schedule(taskRec);
+      done();
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription -> 2. Disconnect -> 3. Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1([objIds[0]], done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.ResubscribePending);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const taskDisc: () => void = () => {
+        mockSubscriptionProxy.notifyDisconnect();
+        done();
+      };
+      asapScheduler.schedule(taskDisc);
+
+      const task: () => void = () => {
+        commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+        done();
+      };
+      asapScheduler.schedule(task);
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create single subscription -> 2. Disconnect -> 3. Create second subscription -> 4. Reconnect -> 5. Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1, objectId2];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1([objIds[0]], done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.ResubscribePending);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const taskDisc: () => void = () => {
+        mockSubscriptionProxy.notifyDisconnect();
+        done();
+      };
+      asapScheduler.schedule(taskDisc);
+
+      const taskSub2: () => void = () => {
+
+        subscribeForClient1([objIds[1]], done);
+        const vs2: GmsSubscription<PropertyCommand> = cmdSubsClient1[1];
+        stateNotifiesPerCmdSubscriptionExpected.set(vs2.id, []);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribing);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribed);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Unsubscribed);
+
+        const taskRec: () => void = () => {
+          mockSubscriptionProxy.notifyReconnect();
+          // called in here in order tthat the subscribe reply of the reconnect runs first.
+          const task: () => void = () => {
+            commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+            done();
+          };
+          asapScheduler.schedule(task);
+          done();
+        };
+        asapScheduler.schedule(taskRec);
+        done();
+      };
+      asapScheduler.schedule(taskSub2);
+    }
+  );
+
+  it('CommandSubscriptionService: 1. Create subscription -> 2. Disconnect -> 3. Create 2nd subscription of existing object -> 4. Reconnect -> 5. Unsubscribe',
+    (done: DoneFn) => {
+      const objIds: string[] = [objectId1];
+      init();
+      mockSubscriptionProxy.setSubcribeReply(getSubscribeReply(objIds, 0));
+      subscribeForClient1([objIds[0]], done);
+      const cs: GmsSubscription<PropertyCommand> = cmdSubsClient1[0];
+      stateNotifiesPerCmdSubscriptionExpected.set(cs.id, []);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.ResubscribePending);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribing);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Subscribed);
+      stateNotifiesPerCmdSubscriptionExpected.get(cs.id)?.push(SubscriptionState.Unsubscribed);
+
+      const taskDisc: () => void = () => {
+        mockSubscriptionProxy.notifyDisconnect();
+        done();
+      };
+      asapScheduler.schedule(taskDisc);
+
+      const taskSub2: () => void = () => {
+
+        subscribeForClient1([objIds[0]], done);
+        const vs2: GmsSubscription<PropertyCommand> = cmdSubsClient1[1];
+        stateNotifiesPerCmdSubscriptionExpected.set(vs2.id, []);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.ResubscribePending);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribing);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Subscribed);
+        stateNotifiesPerCmdSubscriptionExpected.get(vs2.id)?.push(SubscriptionState.Unsubscribed);
+
+        const taskRec: () => void = () => {
+          mockSubscriptionProxy.notifyReconnect();
+          // called in here in order tthat the subscribe reply of the reconnect runs first.
+          const task: () => void = () => {
+            commandSubscriptionService.unsubscribeCommands(cmdSubsClient1, clientId1Key);
+            done();
+          };
+          asapScheduler.schedule(task);
+          done();
+        };
+        asapScheduler.schedule(taskRec);
+        done();
+      };
+      asapScheduler.schedule(taskSub2);
+    }
+  );
+
+});
