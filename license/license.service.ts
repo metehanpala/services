@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { Action, CustomData, CustomSetting, NotifConfiguration, Notification, NotificationServiceBase, TraceService } from '@gms-flex/services-common';
 import { TranslateService } from '@ngx-translate/core';
-import { BehaviorSubject, Observable, Observer, Subscription, of } from 'rxjs';
+import { BehaviorSubject, Observable, Observer, of, Subscription } from 'rxjs';
 import { map, share } from 'rxjs/operators';
 
 import { TablesEx } from '../icons-mapper/data.model';
@@ -32,6 +32,8 @@ export class LicenseService extends LicenseServiceBase {
   private gotDisconnected = false;
   private readonly _configuration: NotifConfiguration | null = null;
   private readonly _notificationSenderLicense = 'license';
+  private readonly _license: BehaviorSubject<LicenseWsi | null> = new BehaviorSubject<LicenseWsi | null>(null);
+  private _subscribed = 0;
   private _licenseConfigDescription = '';
   private _licenseText = '';
   private _licenseNotifText = '';
@@ -45,9 +47,7 @@ export class LicenseService extends LicenseServiceBase {
     private readonly translateService: TranslateService) {
     super();
     this.traceService.info(TraceModules.license, 'LicenseService created.');
-
     this.licenseProxyService.notifyConnectionState().subscribe(connectionState => this.onNotifyConnectionState(connectionState));
-
     this.translateService.get([
       'GMS_SERVICES.LICENSE_DESCRIPTION'
     ]).subscribe(res => {
@@ -64,36 +64,49 @@ export class LicenseService extends LicenseServiceBase {
     });
   }
 
-  public unSubscribeLicense(): Observable<boolean> {
-    if (this.licenseSubscription !== null) {
-      this.licenseSubscription.unsubscribe();
-      this.licenseSubscription = null;
-      return this.licenseProxyService.unsubscribeLicense();
-    }
+  public licenseNotification(): Observable<LicenseWsi | null> {
+    return this._license.asObservable();
+  }
 
-    // No active subscription, resolve immediately
+  public unSubscribeLicense(): Observable<boolean> {
+    this.traceService.info(TraceModules.license, 'LicenseService.unSubscribeLicense() called.');
+
+    if (this._subscribed > 0) {
+      this._subscribed--;
+
+      if (this._subscribed === 0) {
+        if (this.licenseSubscription !== null) {
+          this.licenseSubscription.unsubscribe();
+          this.licenseSubscription = null;
+        }
+        return this.licenseProxyService.unsubscribeLicense();
+      }
+    }
     return of(true);
   }
 
   public subscribeLicense(): void {
-    // prevent multiple subscriptions which would lead to duplicated notifications
-    if (this.licenseSubscription !== null) {
-      this.licenseSubscription.unsubscribe();
+    this.traceService.info(TraceModules.license, 'LicenseService.subscribeLicense() called.');
+
+    if (this._subscribed === 0) {
+      this.licenseSubscription = this.licenseProxyService.licenseNotification().subscribe(license => this.onLicenseNotification(license));
+      this.licenseProxyService.subscribeLicense();
     }
-
-    this.licenseSubscription = this.licenseProxyService
-      .licenseNotification()
-      .subscribe(license => this.onLicenseNotification(license));
-
-    this.traceService.info(
-      TraceModules.license,
-      'LicenseService.subscribeEvents() called.'
-    );
-
-    this.licenseProxyService.subscribeLicense();
+    this._subscribed++;
   }
 
-  private onLicenseNotification(license: LicenseWsi): void {
+  private onLicenseNotification(licenseWsi: LicenseWsi): void {
+    this.traceService.info(TraceModules.license, 'LicenseService.onLicenseNotification() called.');
+
+    if (licenseWsi !== null) {
+      this._license.next(licenseWsi);
+      this.ManagerLicenseNotification(licenseWsi);
+    } else {
+      this.traceService.error(TraceModules.license, 'LicenseService.onLicenseNotification() license is null.');
+    }
+  }
+
+  private ManagerLicenseNotification(license: LicenseWsi): void {
     // 0 developer license
     // 1 demo mode
     // 2 courtesy
