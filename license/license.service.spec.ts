@@ -125,13 +125,21 @@ describe('LicenseService', () => {
       expect(subscribeSpy).toHaveBeenCalled();
     });
 
-    it('should unsubscribe from license notifications', done => {
+    it('should unsubscribe from license notifications', fakeAsync(() => {
       const unsubscribeSpy = spyOn(licenseProxyService, 'unsubscribeLicense').and.callThrough();
+
+      service.subscribeLicense();
+      tick();
+
+      let resultValue: boolean | undefined;
       service.unSubscribeLicense().subscribe(result => {
-        expect(result).toBe(true);
-        expect(unsubscribeSpy).toHaveBeenCalled();
-        done();
+        resultValue = result;
       });
+      tick();
+
+      expect(resultValue).toBe(true);
+      expect(unsubscribeSpy).toHaveBeenCalled();
+    }));
     });
   });
 
@@ -307,7 +315,7 @@ describe('LicenseService', () => {
       tick();
 
       expect(cancelSpy).toHaveBeenCalled();
-      expect(cancelSpy.calls.count()).toBe(2);
+      expect(cancelSpy.calls.count()).toBe(1);
     }));
 
     it('should handle normal license mode (no notification)', fakeAsync(() => {
@@ -326,7 +334,7 @@ describe('LicenseService', () => {
       tick();
 
       expect(cancelSpy).toHaveBeenCalled();
-      expect(cancelSpy.calls.count()).toBe(2);
+      expect(cancelSpy.calls.count()).toBe(1);
     }));
 
     it('should handle very short expiration time', fakeAsync(() => {

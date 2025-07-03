@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { Action, CustomData, CustomSetting, NotifConfiguration, Notification, NotificationServiceBase, TraceService } from '@gms-flex/services-common';
 import { TranslateService } from '@ngx-translate/core';
-import { BehaviorSubject, Observable, Observer, Subscription } from 'rxjs';
+import { BehaviorSubject, Observable, Observer, Subscription, of } from 'rxjs';
 import { map, share } from 'rxjs/operators';
 
 import { TablesEx } from '../icons-mapper/data.model';
@@ -68,14 +68,27 @@ export class LicenseService extends LicenseServiceBase {
     if (this.licenseSubscription !== null) {
       this.licenseSubscription.unsubscribe();
       this.licenseSubscription = null;
+      return this.licenseProxyService.unsubscribeLicense();
     }
-    return this.licenseProxyService.unsubscribeLicense();
+
+    // No active subscription, resolve immediately
+    return of(true);
   }
 
   public subscribeLicense(): void {
-    this.licenseSubscription = this.licenseProxyService.licenseNotification().subscribe(license => this.onLicenseNotification(license));
+    // prevent multiple subscriptions which would lead to duplicated notifications
+    if (this.licenseSubscription !== null) {
+      this.licenseSubscription.unsubscribe();
+    }
 
-    this.traceService.info(TraceModules.license, 'LicenseService.subscribeEvents() called.');
+    this.licenseSubscription = this.licenseProxyService
+      .licenseNotification()
+      .subscribe(license => this.onLicenseNotification(license));
+
+    this.traceService.info(
+      TraceModules.license,
+      'LicenseService.subscribeEvents() called.'
+    );
 
     this.licenseProxyService.subscribeLicense();
   }
